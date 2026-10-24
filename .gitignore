@@ -1,0 +1,9 @@
+/aosp/
+/runtime/target/
+/corelib/out/
+/corelib/dex/
+/framework/out/
+/testapp/out/*
+!/testapp/out/WinCalc.apk
+*.class
+err.txt
