@@ -85,6 +85,7 @@ pub struct Runtime {
     pub(crate) re_pats: Vec<Rc<crate::rx::Regex>>,
     pub(crate) re_ms: Vec<crate::rx::Matcher>,
     pub(crate) main_thread: u32,
+    pub(crate) th: crate::threads::Threads,
 }
 
 pub const HOOK_STRING: u8 = 1;
@@ -174,6 +175,7 @@ impl Runtime {
             re_pats: Vec::new(),
             re_ms: Vec::new(),
             main_thread: 0,
+            th: Default::default(),
         };
         rt.heap.push(Obj { class: 0, fields: vec![], kind: Kind::Plain });
 
@@ -298,7 +300,10 @@ impl Runtime {
             return Ok(());
         }
         if let Some(m) = self.classes[c].methods.get("<clinit>()V").cloned() {
-            self.invoke(&m, vec![])?;
+            self.th.in_clinit += 1;
+            let r = self.invoke(&m, vec![]);
+            self.th.in_clinit -= 1;
+            r?;
         }
         self.classes[c].init = 2;
         Ok(())
@@ -318,18 +323,24 @@ impl Runtime {
         self.roots.push(r);
     }
 
+    pub fn remove_root(&mut self, r: Ref) {
+        if let Some(i) = self.roots.iter().rposition(|&x| x == r) {
+            self.roots.swap_remove(i);
+        }
+    }
+
     pub fn live_objects(&self) -> usize {
         self.heap.len() - self.free.len()
     }
 
     pub fn maybe_gc(&mut self) {
-        if self.depth == 0 && self.allocs > 20000 && std::env::var("WINART_NOGC").is_err() {
+        if crate::threads::depth() == 0 && self.allocs > 20000 && std::env::var("WINART_NOGC").is_err() {
             self.gc();
         }
     }
 
     pub fn gc(&mut self) -> usize {
-        if self.depth != 0 {
+        if crate::threads::depth() != 0 {
             return 0;
         }
         let n = self.heap.len();
@@ -343,6 +354,15 @@ impl Runtime {
         };
         for &r in &self.roots {
             push(r as u64, &mut mark, &mut work);
+        }
+        for &(_, p) in &self.th.frames {
+            let f = unsafe { &*(p as *const Frame) };
+            for &v in &f.regs {
+                push(v as u64, &mut mark, &mut work);
+            }
+            push(f.exc as u64, &mut mark, &mut work);
+            push(f.ret, &mut mark, &mut work);
+            push(f.ret >> 32, &mut mark, &mut work);
         }
         for &r in self.interned.values() {
             push(r as u64, &mut mark, &mut work);
@@ -622,7 +642,10 @@ impl Runtime {
                 Some(Ok(self.class_obj(c) as u64))
             }
 
-            _ => self.res_native(key, args),
+            _ => match self.thread_api(key, args) {
+                Some(r) => Some(r),
+                None => self.res_native(key, args),
+            },
         }
     }
 
@@ -638,15 +661,15 @@ impl Runtime {
     }
 
     pub fn invoke(&mut self, m: &Rc<Method>, args: Vec<u32>) -> R<u64> {
-        if self.depth > 600 {
+        if crate::threads::depth() > 600 {
             return Err(self.throw_new("Ljava/lang/StackOverflowError;"));
         }
-        self.depth += 1;
+        crate::threads::depth_add(1);
         if m.code.is_some() {
             let h = self.classes[m.class].hook;
             if h != 0 {
                 if let Some(r) = self.hook_native(h, &m.key, &args) {
-                    self.depth -= 1;
+                    crate::threads::depth_sub(1);
                     return r;
                 }
             }
@@ -664,16 +687,26 @@ impl Runtime {
         }
         if self.trace {
 
-            eprintln!("{}{}->{}", " ".repeat(self.depth.min(40)), self.classes[m.class].name, m.key);
+            eprintln!("{}{}->{}", " ".repeat(crate::threads::depth().min(40)), self.classes[m.class].name, m.key);
         }
         let r = match &m.code {
-            Some(_) => self.exec(m, args),
+            Some(_) => {
+                if self.th.mt && m.access & 0x20 != 0 {
+                    let lo = if m.access & 8 != 0 { self.class_obj(m.class) } else { args[0] };
+                    let _ = self.monitor_enter(lo);
+                    let r = self.exec(m, args);
+                    self.monitor_exit(lo);
+                    r
+                } else {
+                    self.exec(m, args)
+                }
+            }
             None => {
                 let cn = self.classes[m.class].name.clone();
                 self.call_native(&cn, &m.key, &args)
             }
         };
-        self.depth -= 1;
+        crate::threads::depth_sub(1);
         r
     }
 
@@ -821,8 +854,26 @@ impl Runtime {
                 f.regs[base + k] = *v;
             }
         }
+        let reg = self.th.mt;
+        let addr = &f as *const Frame as usize;
+        if reg {
+            self.th.frames.push((crate::threads::cur_tid(), addr));
+        }
+        let res = self.exec_loop(m, &dex, &code, &mut f);
+        if reg {
+            if let Some(i) = self.th.frames.iter().rposition(|x| x.1 == addr) {
+                self.th.frames.remove(i);
+            }
+        }
+        res
+    }
+
+    fn exec_loop(&mut self, m: &Rc<Method>, dex: &Rc<Dex>, code: &Rc<Code>, f: &mut Frame) -> R<u64> {
         loop {
-            match self.step(m, &dex, &code, &mut f) {
+            if self.th.mt {
+                self.preempt();
+            }
+            match self.step(m, dex, code, f) {
                 Ok(Some(v)) => return Ok(v),
                 Ok(None) => {}
                 Err(e) => match self.find_handler(&dex, &code, f.pc, e) {
@@ -1077,7 +1128,19 @@ impl Runtime {
                 r!(aa) = self.class_obj(c);
                 len = 2;
             }
-            0x1d | 0x1e => {}
+            0x1d | 0x1e => {
+                let o = r!(aa);
+                if o == 0 {
+                    return Err(self.npe());
+                }
+                if self.th.mt {
+                    if op == 0x1d {
+                        self.monitor_enter(o)?;
+                    } else {
+                        self.monitor_exit(o);
+                    }
+                }
+            }
             0x1f => {
                 let o = r!(aa);
                 if o != 0 {

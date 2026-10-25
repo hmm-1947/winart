@@ -7,6 +7,16 @@ public class Bundle {
 
     public Bundle() {}
 
+    public Bundle(Bundle o) {
+        n = o.n;
+        keys = new String[Math.max(4, o.keys.length)];
+        vals = new Object[keys.length];
+        for (int i = 0; i < n; i++) {
+            keys[i] = o.keys[i];
+            vals[i] = o.vals[i];
+        }
+    }
+
     private int find(String k) {
         for (int i = 0; i < n; i++) {
             if (keys[i].equals(k)) {

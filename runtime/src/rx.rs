@@ -1434,39 +1434,6 @@ impl Runtime {
         }
     }
 
-    pub(crate) fn thread_native(&mut self, key: &str, a: &[u32]) -> Option<R<u64>> {
-        match key {
-            "currentThread()Ljava/lang/Thread;" => {
-                if self.main_thread == 0 {
-                    let c = self.load("Ljava/lang/Thread;");
-                    let n = self.classes[c].inst_total;
-                    let mut fields = vec![0u64; n];
-                    let nm = self.str_ref("main") as u64;
-                    if let Some(&s) = self.classes[c].inst_idx.get("name") {
-                        fields[s] = nm;
-                    }
-                    if let Some(&s) = self.classes[c].inst_idx.get("priority") {
-                        fields[s] = 5;
-                    }
-                    if let Some(&s) = self.classes[c].inst_idx.get("tid") {
-                        fields[s] = 1;
-                    }
-                    let r = self.alloc(Obj { class: c, fields, kind: Kind::Plain });
-                    self.add_root(r);
-                    self.main_thread = r;
-                }
-                Some(Ok(self.main_thread as u64))
-            }
-            "interrupted()Z" | "isInterrupted()Z" | "isInterrupted(Z)Z" => Some(Ok(0)),
-            "yield()V" => Some(Ok(0)),
-            "sleep(Ljava/lang/Object;JI)V" => {
-                std::thread::sleep(Duration::from_millis(lng(a, 1)));
-                Some(Ok(0))
-            }
-            _ => None,
-        }
-    }
-
     pub(crate) fn registry_native(&mut self, key: &str) -> Option<R<u64>> {
         match key {
             "registerNativeAllocation(Ljava/lang/Object;J)Ljava/lang/Runnable;" => Some(Ok(0)),

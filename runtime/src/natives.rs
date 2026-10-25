@@ -177,7 +177,18 @@ impl Runtime {
                     return None;
                 }
             }
-            "notify()V" | "notifyAll()V" | "wait(JI)V" => Ok(0),
+            "notify()V" => {
+                self.obj_notify(this, false);
+                Ok(0)
+            }
+            "notifyAll()V" => {
+                self.obj_notify(this, true);
+                Ok(0)
+            }
+            "wait(JI)V" => {
+                let ms = (a.get(1).copied().unwrap_or(0) as u64) | ((a.get(2).copied().unwrap_or(0) as u64) << 32);
+                self.obj_wait(this, ms, a.get(3).copied().unwrap_or(0)).map(|_| 0)
+            }
             _ => return None,
         };
         Some(r)

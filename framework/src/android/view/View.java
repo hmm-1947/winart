@@ -1,8 +1,11 @@
 package android.view;
 
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.AttributeSet;
 import android.winrt.Native;
+import android.winrt.Host;
 import android.winrt.XmlAttrs;
 
 public class View {
@@ -246,11 +249,40 @@ public class View {
         return mPadBottom;
     }
 
+    private void winrtCheckThread() {
+        if (!Native.isMainThread() && Host.winrtAttached(this)) {
+            throw new ViewRootImpl.CalledFromWrongThreadException("Only the original thread that created a view hierarchy can touch its views.");
+        }
+    }
+
+    public final View winrtParent() {
+        return mParent;
+    }
+
+    private static Handler winrtMainHandler() {
+        return new Handler(Looper.getMainLooper());
+    }
+
+    public boolean post(Runnable action) {
+        return winrtMainHandler().post(action);
+    }
+
+    public boolean postDelayed(Runnable action, long delayMillis) {
+        return winrtMainHandler().postDelayed(action, delayMillis);
+    }
+
+    public boolean removeCallbacks(Runnable action) {
+        winrtMainHandler().removeCallbacks(action);
+        return true;
+    }
+
     public void invalidate() {
+        winrtCheckThread();
         Native.invalidate();
     }
 
     public void requestLayout() {
+        winrtCheckThread();
         Native.invalidate();
     }
 

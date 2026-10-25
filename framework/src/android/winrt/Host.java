@@ -1,6 +1,7 @@
 package android.winrt;
 
 import android.app.Activity;
+import android.os.Looper;
 import android.view.View;
 
 public final class Host {
@@ -15,6 +16,25 @@ public final class Host {
 
     public static void init(float density) {
         DENSITY = density;
+        if (Looper.getMainLooper() == null) {
+            Looper.prepareMainLooper();
+        }
+    }
+
+    public static boolean winrtAttached(View v) {
+        View r = sActivity == null ? null : sActivity.winrtContent();
+        if (r == null) {
+            return false;
+        }
+        View p = v;
+        while (p.winrtParent() != null) {
+            p = p.winrtParent();
+        }
+        return p == r;
+    }
+
+    public static long pumpMain() {
+        return Looper.winrtPump();
     }
 
     public static boolean clickByText(String s) {

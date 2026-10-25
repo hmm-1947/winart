@@ -17,6 +17,16 @@ public final class Native {
 
     public static native void exit();
 
+    public static native void wakeMain();
+
+    public static native void log(String s);
+
+    public static native long uptimeMillis();
+
+    public static native boolean isMainThread();
+
+    public static native int threadId();
+
     public static native int resType(int id);
 
     public static native int resData(int id);

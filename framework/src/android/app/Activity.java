@@ -2,6 +2,8 @@ package android.app;
 
 import android.content.ContextWrapper;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 
@@ -48,12 +50,28 @@ public class Activity extends ContextWrapper {
     }
 
     public void finish() {
+        if (!Native.isMainThread()) {
+            new Handler(Looper.getMainLooper()).post(new Runnable() {
+                public void run() {
+                    finish();
+                }
+            });
+            return;
+        }
         mFinished = true;
         Native.exit();
     }
 
     public boolean isFinishing() {
         return mFinished;
+    }
+
+    public final void runOnUiThread(Runnable action) {
+        if (Native.isMainThread()) {
+            action.run();
+        } else {
+            new Handler(Looper.getMainLooper()).post(action);
+        }
     }
 
     public final View winrtContent() {

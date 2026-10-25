@@ -1,6 +1,9 @@
 use crate::runtime::Runtime;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicIsize, Ordering};
+
+static HWND_G: AtomicIsize = AtomicIsize::new(0);
 
 type Hwnd = isize;
 
@@ -90,6 +93,9 @@ extern "system" {
     fn ReleaseDC(h: Hwnd, dc: isize) -> i32;
     fn SetCapture(h: Hwnd) -> Hwnd;
     fn ReleaseCapture() -> i32;
+    fn PostMessageW(h: Hwnd, m: u32, w: usize, l: isize) -> i32;
+    fn SetTimer(h: Hwnd, id: usize, ms: u32, f: isize) -> usize;
+    fn KillTimer(h: Hwnd, id: usize) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -187,8 +193,49 @@ pub fn measure_text(s: &str, size: i32) -> i32 {
     }
 }
 
+pub fn wake() {
+    let h = HWND_G.load(Ordering::SeqCst);
+    if h != 0 {
+        unsafe {
+            PostMessageW(h, 0x8001, 0, 0);
+        }
+    }
+}
+
+fn call_long(key: &str, args: Vec<u32>) -> Option<u64> {
+    let rt = RT.with(|r| r.get());
+    if rt.is_null() {
+        return None;
+    }
+    let rt = unsafe { &mut *rt };
+    let r = match rt.call_static("Landroid/winrt/Host;", key, args) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!("exception in Host.{}: {}", key, rt.class_name_of(e));
+            None
+        }
+    };
+    rt.maybe_gc();
+    r
+}
+
+unsafe fn pump_main(h: Hwnd) {
+    match call_long("pumpMain()J", vec![]) {
+        Some(v) if (v as i64) == 0 => {
+            KillTimer(h, 7);
+            PostMessageW(h, 0x8001, 0, 0);
+        }
+        Some(v) if (v as i64) > 0 => {
+            SetTimer(h, 7, (v as i64).min(0x7fff_ffff) as u32, 0);
+        }
+        _ => {
+            KillTimer(h, 7);
+        }
+    }
+}
+
 pub fn invalidate() {
-    let h = WND.with(|w| w.get());
+    let h = HWND_G.load(Ordering::SeqCst);
     if h != 0 {
         unsafe {
             InvalidateRect(h, std::ptr::null(), 0);
@@ -197,7 +244,7 @@ pub fn invalidate() {
 }
 
 pub fn set_title(s: &str) {
-    let h = WND.with(|w| w.get());
+    let h = HWND_G.load(Ordering::SeqCst);
     if h != 0 {
         let w = wide(s);
         unsafe {
@@ -273,6 +320,10 @@ unsafe extern "system" fn wndproc(h: Hwnd, m: u32, w: usize, l: isize) -> isize 
             0
         }
         0x0014 => 1,
+        0x8001 | 0x0113 => {
+            pump_main(h);
+            0
+        }
         0x0201 | 0x0202 => {
             let x = (l & 0xffff) as u16 as i16 as i32;
             let y = ((l >> 16) & 0xffff) as u16 as i16 as i32;
@@ -328,6 +379,7 @@ pub fn create(rt: &mut Runtime, title: &str, w_dp: i32, h_dp: i32) -> f32 {
         let t = wide(title);
         let h = CreateWindowExW(0, cls.as_ptr(), t.as_ptr(), style, 100, 50, r.r - r.l, r.b - r.t, 0, 0, inst, std::ptr::null());
         WND.with(|w| w.set(h));
+        HWND_G.store(h, Ordering::SeqCst);
         let wd = density_for(GetDpiForWindow(h));
         wd
     }
@@ -339,7 +391,13 @@ pub fn pump() {
         ShowWindow(h, 5);
         UpdateWindow(h);
         let mut msg: Msg = std::mem::zeroed();
-        while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+        loop {
+            crate::threads::gil_release();
+            let got = GetMessageW(&mut msg, 0, 0, 0);
+            crate::threads::gil_acquire();
+            if got <= 0 {
+                break;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

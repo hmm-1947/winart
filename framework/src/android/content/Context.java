@@ -11,6 +11,9 @@ public abstract class Context {
         return this;
     }
 
+    public android.os.Looper getMainLooper() {
+        return android.os.Looper.getMainLooper();
+    }
     public static final String LAYOUT_INFLATER_SERVICE = "layout_inflater";
 
     public Object getSystemService(String name) {

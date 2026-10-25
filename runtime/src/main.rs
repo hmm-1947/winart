@@ -5,6 +5,7 @@ mod natives;
 mod resnative;
 mod rx;
 mod strings;
+mod threads;
 
 mod runtime;
 mod ui;
@@ -163,6 +164,7 @@ fn test_apk(path: &str, args: &[String]) -> Result<(), String> {
     let mut expect: Option<String> = None;
     let mut repeat = 1usize;
     let mut force_gc = false;
+    let mut wait_ms: u64 = 0;
     let mut dump = false;
     let mut seen: Vec<String> = Vec::new();
     let mut keys = Vec::new();
@@ -180,6 +182,9 @@ fn test_apk(path: &str, args: &[String]) -> Result<(), String> {
         } else if args[i] == "--dump" {
             dump = true;
             i += 1;
+        } else if args[i] == "--wait" && i + 1 < args.len() {
+            wait_ms = args[i + 1].parse().map_err(|_| "bad --wait".to_string())?;
+            i += 2;
         } else if args[i] == "--gc" {
             force_gc = true;
             i += 1;
@@ -221,6 +226,32 @@ fn test_apk(path: &str, args: &[String]) -> Result<(), String> {
             if rt.last_text != *e {
                 return Err(format!("FAIL round {} expected display {:?} got {:?}", round, e, rt.last_text));
             }
+        }
+    }
+    if wait_ms > 0 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        loop {
+            let d = match rt.call_static("Landroid/winrt/Host;", "pumpMain()J", vec![]) {
+                Ok(v) => v as i64,
+                Err(e) => return Err(format!("pumpMain exception {}", rt.class_name_of(e))),
+            };
+            if force_gc {
+                rt.gc();
+            } else {
+                rt.maybe_gc();
+            }
+            peak = peak.max(rt.live_objects());
+            if !seen.is_empty() && seen.iter().all(|s| rt.text_log.iter().any(|t| t == s)) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            let w = if d < 0 { 10 } else { (d as u64).min(10) };
+            if w == 0 {
+                continue;
+            }
+            rt.idle_wait(w);
         }
     }
     for s in &seen {
