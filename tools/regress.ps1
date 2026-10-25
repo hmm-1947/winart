@@ -11,4 +11,5 @@ Run "LayoutTest" @("test","$root\testapp2\out\LayoutTest.apk","--seen","Taps: 2"
 Run "StringTest" @("test","$root\testapp3\out\StringTest.apk","--seen","STRINGTEST ALL PASS")
 Run "ThreadTest" @("test","$root\testapp4\out\ThreadTest.apk","--seen","THREADTEST ALL PASS","--wait","8000")
 Run "ThreadTest-gc" @("test","$root\testapp4\out\ThreadTest.apk","--gc","--seen","THREADTEST ALL PASS","--wait","8000")
+Run "NativeTest" @("test","$root\testapp5\out\NativeTest.apk","--seen","NATIVETEST ALL PASS")
 exit $fail

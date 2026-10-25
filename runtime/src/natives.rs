@@ -1,4 +1,4 @@
-use crate::runtime::{hook_for, Kind, Obj, Runtime, HOOK_BITS, HOOK_CHAR, HOOK_CLASS, HOOK_FACTORY, HOOK_MATCHER, HOOK_MATH, HOOK_OBJECT, HOOK_PATTERN, HOOK_REFERENCE, HOOK_REGISTRY, HOOK_STRING, HOOK_SYSTEM, HOOK_THREAD, HOOK_UTF16, HOOK_VMRUNTIME, R};
+use crate::runtime::{hook_for, Kind, Obj, Runtime, HOOK_BITS, HOOK_CHAR, HOOK_CLASS, HOOK_FACTORY, HOOK_MATCHER, HOOK_MATH, HOOK_OBJECT, HOOK_PATTERN, HOOK_REFERENCE, HOOK_REGISTRY, HOOK_STRING, HOOK_SYSTEM, HOOK_THREAD, HOOK_UNSAFE, HOOK_UTF16, HOOK_VMRUNTIME, R};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -102,6 +102,7 @@ impl Runtime {
             HOOK_MATCHER => self.matcher_native(key, a),
             HOOK_REFERENCE => self.reference_native(key, a),
             HOOK_VMRUNTIME => vmruntime_native(key, a),
+            HOOK_UNSAFE => self.unsafe_native(key, a),
             HOOK_UTF16 => match key {
                 "isBigEndian()Z" => Some(Ok(0)),
                 _ => None,
@@ -192,6 +193,29 @@ impl Runtime {
             _ => return None,
         };
         Some(r)
+    }
+
+    fn prim_size(desc: &str) -> i32 {
+        match desc {
+            "Z" | "B" => 1,
+            "S" | "C" => 2,
+            "I" | "F" => 4,
+            "J" | "D" => 8,
+            _ => 4,
+        }
+    }
+
+    fn unsafe_native(&mut self, key: &str, a: &[u32]) -> Option<R<u64>> {
+        match key {
+            "getArrayBaseOffsetForComponentType(Ljava/lang/Class;)I" | "getArrayIndexScaleForComponentType(Ljava/lang/Class;)I" => {
+                let c = self.class_of(a.first().copied().unwrap_or(0))?;
+                let desc = self.classes[c].name.clone();
+                Some(Ok(Self::prim_size(&desc) as u64))
+            }
+            "addressSize()I" => Some(Ok(8)),
+            "pageSize()I" => Some(Ok(4096)),
+            _ => None,
+        }
     }
 
     fn class_of(&self, r: u32) -> Option<usize> {
@@ -360,6 +384,9 @@ impl Runtime {
     }
 
     fn system_native(&mut self, key: &str, a: &[u32]) -> Option<R<u64>> {
+        if let Some(r) = self.native_load_hook(key, a) {
+            return Some(r);
+        }
         let r: R<u64> = match key {
             "arraycopy(Ljava/lang/Object;ILjava/lang/Object;II)V" => self.arraycopy(a),
             _ if key.starts_with("arraycopy") && key.contains("Unchecked(") => self.arraycopy(a),

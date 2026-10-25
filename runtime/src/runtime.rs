@@ -86,6 +86,7 @@ pub struct Runtime {
     pub(crate) re_ms: Vec<crate::rx::Matcher>,
     pub(crate) main_thread: u32,
     pub(crate) th: crate::threads::Threads,
+    pub(crate) jni: crate::jni::Jni,
 }
 
 pub const HOOK_STRING: u8 = 1;
@@ -103,6 +104,7 @@ pub const HOOK_PATTERN: u8 = 12;
 pub const HOOK_MATCHER: u8 = 13;
 pub const HOOK_REFERENCE: u8 = 14;
 pub const HOOK_VMRUNTIME: u8 = 15;
+pub const HOOK_UNSAFE: u8 = 16;
 
 pub(crate) fn hook_for(name: &str) -> u8 {
     match name {
@@ -121,6 +123,7 @@ pub(crate) fn hook_for(name: &str) -> u8 {
         "Lcom/android/icu/util/regex/MatcherNative;" => HOOK_MATCHER,
         "Ljava/lang/ref/Reference;" => HOOK_REFERENCE,
         "Ldalvik/system/VMRuntime;" => HOOK_VMRUNTIME,
+        "Ljdk/internal/misc/Unsafe;" => HOOK_UNSAFE,
         _ => 0,
     }
 }
@@ -176,6 +179,7 @@ impl Runtime {
             re_ms: Vec::new(),
             main_thread: 0,
             th: Default::default(),
+            jni: Default::default(),
         };
         rt.heap.push(Obj { class: 0, fields: vec![], kind: Kind::Plain });
 
@@ -367,6 +371,12 @@ impl Runtime {
         for &r in self.interned.values() {
             push(r as u64, &mut mark, &mut work);
         }
+        for &r in &self.jni.globals {
+            push(r as u64, &mut mark, &mut work);
+        }
+        for &(_, r) in &self.jni.locals {
+            push(r as u64, &mut mark, &mut work);
+        }
         for &r in self.class_objs.values() {
             push(r as u64, &mut mark, &mut work);
         }
@@ -504,7 +514,7 @@ impl Runtime {
         None
     }
 
-    fn find_static(&self, c: usize, name: &str) -> Option<(usize, usize)> {
+    pub(crate) fn find_static(&self, c: usize, name: &str) -> Option<(usize, usize)> {
         let mut cur = Some(c);
         while let Some(ci) = cur {
             if let Some(&s) = self.classes[ci].static_idx.get(name) {
@@ -702,8 +712,13 @@ impl Runtime {
                 }
             }
             None => {
-                let cn = self.classes[m.class].name.clone();
-                self.call_native(&cn, &m.key, &args)
+                match self.jni_invoke(m, &args) {
+                    Some(r) => r,
+                    None => {
+                        let cn = self.classes[m.class].name.clone();
+                        self.call_native(&cn, &m.key, &args)
+                    }
+                }
             }
         };
         crate::threads::depth_sub(1);
@@ -744,7 +759,7 @@ impl Runtime {
         }
     }
 
-    fn string_init(&mut self, key: &str, args: Vec<u32>) -> R<u32> {
+    pub(crate) fn string_init(&mut self, key: &str, args: Vec<u32>) -> R<u32> {
         let sf = self.load("Ljava/lang/StringFactory;");
         self.ensure_init(sf)?;
         let params = key["<init>".len()..].to_string();

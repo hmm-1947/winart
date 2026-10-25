@@ -1,6 +1,9 @@
 mod arsc;
 mod axml;
+mod bionic;
 mod dex;
+mod elf;
+mod jni;
 mod natives;
 mod resnative;
 mod rx;
@@ -125,6 +128,7 @@ fn load_app(path: &str) -> Result<(runtime::Runtime, axml::Manifest, u32), Strin
     rt.start();
     let fw = boot_path().and_then(|p| p.parent().map(|d| d.join("framework.dex"))).ok_or("no framework.dex")?;
     rt.add_dex(dex::Dex::parse(std::fs::read(&fw).map_err(|e| format!("{}: {}", fw.display(), e))?)?);
+    rt.jni.app_dex = Some(rt.dexes.len());
     for name in dex_names(&z) {
         rt.add_dex(dex::Dex::parse(z.read(&name).ok_or("dex read failed")?)?);
     }
