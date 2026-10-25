@@ -1,7 +1,9 @@
 package android.view;
 
 import android.content.Context;
+import android.util.AttributeSet;
 import android.winrt.Native;
+import android.winrt.XmlAttrs;
 
 public class View {
     public interface OnClickListener {
@@ -56,9 +58,78 @@ public class View {
     protected int mPadTop;
     protected int mPadRight;
     protected int mPadBottom;
+    protected int mMinWidth;
+    protected int mMinHeight;
 
     public View(Context context) {
+        this(context, null);
+    }
+
+    public View(Context context, AttributeSet attrs) {
         mContext = context;
+        if (attrs instanceof XmlAttrs) {
+            applyViewAttrs((XmlAttrs) attrs);
+        }
+    }
+
+    private void applyViewAttrs(XmlAttrs a) {
+        int n = a.getAttributeCount();
+        int all = -1;
+        int pl = -1;
+        int pt = -1;
+        int pr = -1;
+        int pb = -1;
+        for (int i = 0; i < n; i++) {
+            if (!a.isAndroid(i)) {
+                continue;
+            }
+            String name = a.getAttributeName(i);
+            if (name.equals("id")) {
+                mId = a.refId(i);
+            } else if (name.equals("background")) {
+                int t = a.rtype(i);
+                if (t >= 0x1c && t <= 0x1f) {
+                    mBackground = a.color(i, 0);
+                    mHasBackground = true;
+                }
+            } else if (name.equals("padding")) {
+                all = a.dimenPx(i, 0);
+            } else if (name.equals("paddingLeft") || name.equals("paddingStart")) {
+                pl = a.dimenPx(i, 0);
+            } else if (name.equals("paddingTop")) {
+                pt = a.dimenPx(i, 0);
+            } else if (name.equals("paddingRight") || name.equals("paddingEnd")) {
+                pr = a.dimenPx(i, 0);
+            } else if (name.equals("paddingBottom")) {
+                pb = a.dimenPx(i, 0);
+            } else if (name.equals("minWidth")) {
+                mMinWidth = a.dimenPx(i, 0);
+            } else if (name.equals("minHeight")) {
+                mMinHeight = a.dimenPx(i, 0);
+            } else if (name.equals("visibility")) {
+                int v = a.intVal(i, 0);
+                mVisibility = v == 1 ? INVISIBLE : v == 2 ? GONE : VISIBLE;
+            } else if (name.equals("clickable")) {
+                mClickable = a.bool(i, false);
+            } else if (name.equals("enabled")) {
+                mEnabled = a.bool(i, true);
+            } else if (name.equals("onClick")) {
+                final String method = a.text(i);
+                final Context ctx = mContext;
+                setOnClickListener(new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        Native.invokeClick(ctx, method, v);
+                    }
+                });
+            }
+        }
+        if (all >= 0 || pl >= 0 || pt >= 0 || pr >= 0 || pb >= 0) {
+            mPadLeft = pl >= 0 ? pl : all >= 0 ? all : 0;
+            mPadTop = pt >= 0 ? pt : all >= 0 ? all : 0;
+            mPadRight = pr >= 0 ? pr : all >= 0 ? all : 0;
+            mPadBottom = pb >= 0 ? pb : all >= 0 ? all : 0;
+        }
     }
 
     public Context getContext() {
@@ -188,7 +259,15 @@ public class View {
     }
 
     protected void onMeasure(int widthSpec, int heightSpec) {
-        setMeasuredDimension(resolveSize(mPadLeft + mPadRight, widthSpec), resolveSize(mPadTop + mPadBottom, heightSpec));
+        int w = mPadLeft + mPadRight;
+        int h = mPadTop + mPadBottom;
+        if (w < mMinWidth) {
+            w = mMinWidth;
+        }
+        if (h < mMinHeight) {
+            h = mMinHeight;
+        }
+        setMeasuredDimension(resolveSize(w, widthSpec), resolveSize(h, heightSpec));
     }
 
     protected final void setMeasuredDimension(int w, int h) {
@@ -265,7 +344,45 @@ public class View {
         v.mPressed = p;
     }
 
+    public static void winrtDump(View v, int depth) {
+        for (int i = 0; i < depth; i++) {
+            Native.dumpStr("  ");
+        }
+        String kind = v instanceof android.widget.Button ? "Button" : v instanceof android.widget.TextView ? "TextView" : v instanceof android.widget.LinearLayout ? "LinearLayout" : v instanceof ViewGroup ? "ViewGroup" : "View";
+        Native.dumpStr(kind);
+        if (v.mId != NO_ID) {
+            Native.dumpStr(" id=0x");
+            Native.dumpHex(v.mId);
+        }
+        Native.dumpStr(" [");
+        Native.dumpInt(v.mAbsX);
+        Native.dumpStr(",");
+        Native.dumpInt(v.mAbsY);
+        Native.dumpStr(" ");
+        Native.dumpInt(v.getWidth());
+        Native.dumpStr("x");
+        Native.dumpInt(v.getHeight());
+        Native.dumpStr("]");
+        if (v.mVisibility != VISIBLE) {
+            Native.dumpStr(" vis=");
+            Native.dumpInt(v.mVisibility);
+        }
+        if (v instanceof android.widget.TextView) {
+            Native.dumpStr(" text=\"");
+            Native.dumpStr(((android.widget.TextView) v).getText().toString());
+            Native.dumpStr("\"");
+        }
+        Native.dumpStr("\n");
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                winrtDump(g.getChildAt(i), depth + 1);
+            }
+        }
+    }
+
     public static boolean winrtContains(View v, int x, int y) {
+
         return v.containsAbs(x, y);
     }
 }

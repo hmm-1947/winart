@@ -5,6 +5,9 @@ import android.view.View;
 
 public final class Host {
     public static float DENSITY = 2.0f;
+    public static int sWidth;
+    public static int sHeight;
+
     private static Activity sActivity;
     private static View sTarget;
 
@@ -43,7 +46,24 @@ public final class Host {
         a.winrtPerformCreate();
     }
 
+    public static String dump(int w, int h) {
+        sWidth = w;
+        sHeight = h;
+        View r = sActivity == null ? null : sActivity.winrtContent();
+        if (r == null) {
+            return "(no content)";
+        }
+        r.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
+        r.layout(0, 0, w, h);
+        View.winrtUpdateAbs(r);
+        View.winrtDump(r, 0);
+        return Native.dumpTake();
+    }
+
     public static void draw(int w, int h) {
+        sWidth = w;
+        sHeight = h;
+
         Native.fillRect(0, 0, w, h, 0xFFFFFFFF);
         View r = sActivity == null ? null : sActivity.winrtContent();
         if (r == null) {

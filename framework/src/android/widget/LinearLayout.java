@@ -1,8 +1,10 @@
 package android.widget;
 
 import android.content.Context;
+import android.util.AttributeSet;
 import android.view.View;
 import android.view.ViewGroup;
+import android.winrt.XmlAttrs;
 
 public class LinearLayout extends ViewGroup {
     public static final int HORIZONTAL = 0;
@@ -10,6 +12,7 @@ public class LinearLayout extends ViewGroup {
 
     public static class LayoutParams extends ViewGroup.MarginLayoutParams {
         public float weight;
+        public int gravity;
 
         public LayoutParams(int w, int h) {
             super(w, h);
@@ -19,12 +22,43 @@ public class LinearLayout extends ViewGroup {
             super(w, h);
             this.weight = weight;
         }
+
+        public LayoutParams(Context c, AttributeSet attrs) {
+            super(c, attrs);
+            if (attrs instanceof XmlAttrs) {
+                XmlAttrs a = (XmlAttrs) attrs;
+                int i = a.indexOf(XmlAttrs.NS, "layout_weight");
+                if (i >= 0) {
+                    weight = a.floatVal(i, 0f);
+                }
+                i = a.indexOf(XmlAttrs.NS, "layout_gravity");
+                if (i >= 0) {
+                    gravity = a.intVal(i, 0);
+                }
+            }
+        }
     }
 
     private int mOrientation = HORIZONTAL;
+    private int mGravity;
 
     public LinearLayout(Context context) {
-        super(context);
+        this(context, null);
+    }
+
+    public LinearLayout(Context context, AttributeSet attrs) {
+        super(context, attrs);
+        if (attrs instanceof XmlAttrs) {
+            XmlAttrs a = (XmlAttrs) attrs;
+            int i = a.indexOf(XmlAttrs.NS, "orientation");
+            if (i >= 0) {
+                mOrientation = a.intVal(i, HORIZONTAL);
+            }
+            i = a.indexOf(XmlAttrs.NS, "gravity");
+            if (i >= 0) {
+                mGravity = a.intVal(i, 0);
+            }
+        }
     }
 
     public void setOrientation(int o) {
@@ -34,6 +68,20 @@ public class LinearLayout extends ViewGroup {
 
     public int getOrientation() {
         return mOrientation;
+    }
+
+    public void setGravity(int g) {
+        mGravity = g;
+        requestLayout();
+    }
+
+    public int getGravity() {
+        return mGravity;
+    }
+
+    @Override
+    public ViewGroup.LayoutParams generateLayoutParams(AttributeSet attrs) {
+        return new LayoutParams(mContext, attrs);
     }
 
     @Override
@@ -135,7 +183,30 @@ public class LinearLayout extends ViewGroup {
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
         boolean vert = mOrientation == VERTICAL;
         int n = getChildCount();
-        int pos = vert ? getPaddingTop() : getPaddingLeft();
+        int availW = r - l - getPaddingLeft() - getPaddingRight();
+        int availH = b - t - getPaddingTop() - getPaddingBottom();
+        int used = 0;
+        for (int i = 0; i < n; i++) {
+            View c = getChildAt(i);
+            if (c.getVisibility() == GONE) {
+                continue;
+            }
+            LayoutParams p = lp(c);
+            used += vert ? c.getMeasuredHeight() + p.topMargin + p.bottomMargin : c.getMeasuredWidth() + p.leftMargin + p.rightMargin;
+        }
+        int free = (vert ? availH : availW) - used;
+        int hg = mGravity & 7;
+        int vg = mGravity & 0x70;
+        int start = 0;
+        if (vert) {
+            start = vg == 0x10 ? free / 2 : vg == 0x50 ? free : 0;
+        } else {
+            start = hg == 1 ? free / 2 : hg == 5 ? free : 0;
+        }
+        if (start < 0) {
+            start = 0;
+        }
+        int pos = (vert ? getPaddingTop() : getPaddingLeft()) + start;
         for (int i = 0; i < n; i++) {
             View c = getChildAt(i);
             if (c.getVisibility() == GONE) {
@@ -144,14 +215,21 @@ public class LinearLayout extends ViewGroup {
             LayoutParams p = lp(c);
             int w = c.getMeasuredWidth();
             int h = c.getMeasuredHeight();
+            int g = p.gravity != 0 ? p.gravity : mGravity;
             if (vert) {
                 pos += p.topMargin;
-                int x = getPaddingLeft() + p.leftMargin;
+                int room = availW - p.leftMargin - p.rightMargin - w;
+                int cg = g & 7;
+                int off = cg == 1 ? room / 2 : cg == 5 ? room : 0;
+                int x = getPaddingLeft() + p.leftMargin + off;
                 c.layout(x, pos, x + w, pos + h);
                 pos += h + p.bottomMargin;
             } else {
                 pos += p.leftMargin;
-                int y = getPaddingTop() + p.topMargin;
+                int room = availH - p.topMargin - p.bottomMargin - h;
+                int cg = g & 0x70;
+                int off = cg == 0x10 ? room / 2 : cg == 0x50 ? room : 0;
+                int y = getPaddingTop() + p.topMargin + off;
                 c.layout(pos, y, pos + w, y + h);
                 pos += w + p.rightMargin;
             }

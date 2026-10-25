@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">StringTest</string>
+    <string name="hello">Hello</string>
+    <string name="greet_fmt">Hi %1$s, you are %2$d</string>
+</resources>

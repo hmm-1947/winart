@@ -1,6 +1,8 @@
 package android.view;
 
 import android.content.Context;
+import android.util.AttributeSet;
+import android.winrt.XmlAttrs;
 
 public abstract class ViewGroup extends View {
     public static class LayoutParams {
@@ -13,6 +15,22 @@ public abstract class ViewGroup extends View {
             width = w;
             height = h;
         }
+
+        public LayoutParams(Context c, AttributeSet attrs) {
+            width = WRAP_CONTENT;
+            height = WRAP_CONTENT;
+            if (attrs instanceof XmlAttrs) {
+                XmlAttrs a = (XmlAttrs) attrs;
+                int i = a.indexOf(XmlAttrs.NS, "layout_width");
+                if (i >= 0) {
+                    width = a.dimenPx(i, WRAP_CONTENT);
+                }
+                i = a.indexOf(XmlAttrs.NS, "layout_height");
+                if (i >= 0) {
+                    height = a.dimenPx(i, WRAP_CONTENT);
+                }
+            }
+        }
     }
 
     public static class MarginLayoutParams extends LayoutParams {
@@ -23,6 +41,41 @@ public abstract class ViewGroup extends View {
 
         public MarginLayoutParams(int w, int h) {
             super(w, h);
+        }
+
+        public MarginLayoutParams(Context c, AttributeSet attrs) {
+            super(c, attrs);
+            if (attrs instanceof XmlAttrs) {
+                XmlAttrs a = (XmlAttrs) attrs;
+                int all = a.indexOf(XmlAttrs.NS, "layout_margin");
+                int m = all >= 0 ? a.dimenPx(all, 0) : 0;
+                leftMargin = m;
+                topMargin = m;
+                rightMargin = m;
+                bottomMargin = m;
+                int i = a.indexOf(XmlAttrs.NS, "layout_marginLeft");
+                if (i < 0) {
+                    i = a.indexOf(XmlAttrs.NS, "layout_marginStart");
+                }
+                if (i >= 0) {
+                    leftMargin = a.dimenPx(i, 0);
+                }
+                i = a.indexOf(XmlAttrs.NS, "layout_marginTop");
+                if (i >= 0) {
+                    topMargin = a.dimenPx(i, 0);
+                }
+                i = a.indexOf(XmlAttrs.NS, "layout_marginRight");
+                if (i < 0) {
+                    i = a.indexOf(XmlAttrs.NS, "layout_marginEnd");
+                }
+                if (i >= 0) {
+                    rightMargin = a.dimenPx(i, 0);
+                }
+                i = a.indexOf(XmlAttrs.NS, "layout_marginBottom");
+                if (i >= 0) {
+                    bottomMargin = a.dimenPx(i, 0);
+                }
+            }
         }
 
         public void setMargins(int l, int t, int r, int b) {
@@ -37,7 +90,15 @@ public abstract class ViewGroup extends View {
     private int mCount;
 
     public ViewGroup(Context context) {
-        super(context);
+        this(context, null);
+    }
+
+    public ViewGroup(Context context, AttributeSet attrs) {
+        super(context, attrs);
+    }
+
+    public LayoutParams generateLayoutParams(AttributeSet attrs) {
+        return new MarginLayoutParams(mContext, attrs);
     }
 
     protected LayoutParams generateDefaultLayoutParams() {

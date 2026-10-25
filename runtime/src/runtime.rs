@@ -38,6 +38,7 @@ pub struct Class {
     pub inst_total: usize,
     pub methods: HashMap<String, Rc<Method>>,
     pub init: u8,
+    pub hook: u8,
 }
 
 struct MRef {
@@ -56,9 +57,11 @@ pub struct Runtime {
     pub dexes: Vec<Rc<Dex>>,
     pub classes: Vec<Class>,
     by_name: HashMap<String, usize>,
-    defs: HashMap<String, (usize, usize)>,
+    pub(crate) defs: HashMap<String, (usize, usize)>,
     pub heap: Vec<Obj>,
-    interned: HashMap<String, Ref>,
+    pub(crate) interned: HashMap<String, Ref>,
+    pub(crate) strl: Option<(usize, usize, Option<usize>, Option<usize>)>,
+
     class_objs: HashMap<usize, Ref>,
     mcache: HashMap<(usize, u32), Rc<MRef>>,
     sfcache: HashMap<(usize, u32), (usize, usize)>,
@@ -73,6 +76,52 @@ pub struct Runtime {
     allocs: usize,
     roots: Vec<Ref>,
     pub gc_runs: usize,
+    pub arsc: Option<crate::arsc::Arsc>,
+    pub apk: Option<crate::zip::Zip>,
+    pub(crate) xml_docs: HashMap<u32, Rc<Vec<crate::axml::XmlEv>>>,
+    pub(crate) xml_cur: Vec<Option<(Rc<Vec<crate::axml::XmlEv>>, usize)>>,
+    pub text_log: Vec<String>,
+    pub dump_buf: String,
+    pub(crate) re_pats: Vec<Rc<crate::rx::Regex>>,
+    pub(crate) re_ms: Vec<crate::rx::Matcher>,
+    pub(crate) main_thread: u32,
+}
+
+pub const HOOK_STRING: u8 = 1;
+pub const HOOK_FACTORY: u8 = 2;
+pub const HOOK_OBJECT: u8 = 3;
+pub const HOOK_CLASS: u8 = 4;
+pub const HOOK_SYSTEM: u8 = 5;
+pub const HOOK_MATH: u8 = 6;
+pub const HOOK_BITS: u8 = 7;
+pub const HOOK_UTF16: u8 = 8;
+pub const HOOK_CHAR: u8 = 9;
+pub const HOOK_THREAD: u8 = 10;
+pub const HOOK_REGISTRY: u8 = 11;
+pub const HOOK_PATTERN: u8 = 12;
+pub const HOOK_MATCHER: u8 = 13;
+pub const HOOK_REFERENCE: u8 = 14;
+pub const HOOK_VMRUNTIME: u8 = 15;
+
+pub(crate) fn hook_for(name: &str) -> u8 {
+    match name {
+        "Ljava/lang/String;" => HOOK_STRING,
+        "Ljava/lang/StringFactory;" => HOOK_FACTORY,
+        "Ljava/lang/Object;" => HOOK_OBJECT,
+        "Ljava/lang/Class;" => HOOK_CLASS,
+        "Ljava/lang/System;" => HOOK_SYSTEM,
+        "Ljava/lang/Math;" | "Ljava/lang/StrictMath;" => HOOK_MATH,
+        "Ljava/lang/Float;" | "Ljava/lang/Double;" => HOOK_BITS,
+        "Ljava/lang/StringUTF16;" => HOOK_UTF16,
+        "Ljava/lang/Character;" => HOOK_CHAR,
+        "Ljava/lang/Thread;" => HOOK_THREAD,
+        "Llibcore/util/NativeAllocationRegistry;" => HOOK_REGISTRY,
+        "Lcom/android/icu/util/regex/PatternNative;" => HOOK_PATTERN,
+        "Lcom/android/icu/util/regex/MatcherNative;" => HOOK_MATCHER,
+        "Ljava/lang/ref/Reference;" => HOOK_REFERENCE,
+        "Ldalvik/system/VMRuntime;" => HOOK_VMRUNTIME,
+        _ => 0,
+    }
 }
 
 fn builtin_super(name: &str) -> &'static str {
@@ -100,6 +149,8 @@ impl Runtime {
             defs: HashMap::new(),
             heap: vec![],
             interned: HashMap::new(),
+            strl: None,
+
             class_objs: HashMap::new(),
             mcache: HashMap::new(),
             sfcache: HashMap::new(),
@@ -114,6 +165,15 @@ impl Runtime {
             allocs: 0,
             roots: vec![],
             gc_runs: 0,
+            arsc: None,
+            apk: None,
+            xml_docs: HashMap::new(),
+            xml_cur: Vec::new(),
+            text_log: Vec::new(),
+            dump_buf: String::new(),
+            re_pats: Vec::new(),
+            re_ms: Vec::new(),
+            main_thread: 0,
         };
         rt.heap.push(Obj { class: 0, fields: vec![], kind: Kind::Plain });
 
@@ -163,6 +223,7 @@ impl Runtime {
             inst_total: total,
             methods: HashMap::new(),
             init: 2,
+            hook: 0,
         });
         self.by_name.insert(name.to_string(), idx);
         idx
@@ -205,6 +266,7 @@ impl Runtime {
             inst_total: base + cd.instances.len(),
             methods,
             init: 0,
+            hook: hook_for(name),
         });
         self.by_name.insert(name.to_string(), idx);
         let vals = dex.static_values(def.static_values_off);
@@ -222,13 +284,18 @@ impl Runtime {
         idx
     }
 
-    fn ensure_init(&mut self, c: usize) -> R<()> {
+    pub(crate) fn ensure_init(&mut self, c: usize) -> R<()> {
         if self.classes[c].init != 0 {
             return Ok(());
         }
         self.classes[c].init = 1;
         if let Some(s) = self.classes[c].sup {
             self.ensure_init(s)?;
+        }
+        if self.classes[c].hook == HOOK_SYSTEM {
+            self.system_init(c);
+            self.classes[c].init = 2;
+            return Ok(());
         }
         if let Some(m) = self.classes[c].methods.get("<clinit>()V").cloned() {
             self.invoke(&m, vec![])?;
@@ -237,7 +304,7 @@ impl Runtime {
         Ok(())
     }
 
-    fn alloc(&mut self, o: Obj) -> Ref {
+    pub(crate) fn alloc(&mut self, o: Obj) -> Ref {
         self.allocs += 1;
         if let Some(i) = self.free.pop() {
             self.heap[i as usize] = o;
@@ -290,11 +357,14 @@ impl Runtime {
         }
         while let Some(i) = work.pop() {
             let o = &self.heap[i];
-            for &v in &o.fields {
-                push(v, &mut mark, &mut work);
+            if !matches!(o.kind, Kind::Str(_)) {
+                for &v in &o.fields {
+                    push(v, &mut mark, &mut work);
+                }
             }
             if let Kind::Array(a) = &o.kind {
-                for &v in a {
+                let prim = matches!(self.classes[o.class].name.as_bytes().get(1), Some(b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D'));
+                for &v in a.iter().filter(|_| !prim) {
                     push(v, &mut mark, &mut work);
                 }
             }
@@ -313,9 +383,42 @@ impl Runtime {
         freed
     }
 
-    pub fn new_string(&mut self, u: Vec<u16>) -> Ref {
+    pub(crate) fn str_layout(&mut self) -> (usize, usize, Option<usize>, Option<usize>) {
+        if let Some(l) = self.strl {
+            return l;
+        }
         let c = self.load("Ljava/lang/String;");
-        self.alloc(Obj { class: c, fields: vec![], kind: Kind::Str(u) })
+        let cl = &self.classes[c];
+        let l = (c, cl.inst_total, cl.inst_idx.get("count").copied(), cl.inst_idx.get("hash").copied());
+        self.strl = Some(l);
+        l
+    }
+
+    pub fn new_string(&mut self, u: Vec<u16>) -> Ref {
+        let (c, total, count_slot, _) = self.str_layout();
+        let mut fields = vec![0u64; total];
+        if let Some(s) = count_slot {
+            let compressed = u.iter().all(|&x| x != 0 && x < 0x80);
+            fields[s] = ((u.len() as u64) << 1) | (!compressed) as u64;
+        }
+        self.alloc(Obj { class: c, fields, kind: Kind::Str(u) })
+    }
+
+    pub(crate) fn new_array(&mut self, desc: &str, vals: Vec<u64>) -> Ref {
+        let c = self.load(desc);
+        self.alloc(Obj { class: c, fields: vec![], kind: Kind::Array(vals) })
+    }
+
+    pub(crate) fn throw_msg(&mut self, name: &str, msg: &str) -> Ref {
+        let e = self.throw_new(name);
+        let m = self.new_string(msg.encode_utf16().collect());
+        let c = self.heap[e as usize].class;
+        if let Some(&slot) = self.classes[c].inst_idx.get("detailMessage") {
+            if slot < self.heap[e as usize].fields.len() {
+                self.heap[e as usize].fields[slot] = m as u64;
+            }
+        }
+        e
     }
 
     pub fn str_ref(&mut self, s: &str) -> Ref {
@@ -338,17 +441,17 @@ impl Runtime {
         self.classes[self.heap[r as usize].class].name.clone()
     }
 
-    fn throw_new(&mut self, name: &str) -> Ref {
+    pub(crate) fn throw_new(&mut self, name: &str) -> Ref {
         let c = self.load(name);
         let n = self.classes[c].inst_total;
         self.alloc(Obj { class: c, fields: vec![0; n], kind: Kind::Plain })
     }
 
-    fn npe(&mut self) -> Ref {
+    pub(crate) fn npe(&mut self) -> Ref {
         self.throw_new("Ljava/lang/NullPointerException;")
     }
 
-    fn is_sub(&self, c: usize, t: usize) -> bool {
+    pub(crate) fn is_sub(&self, c: usize, t: usize) -> bool {
         if c == t {
             return true;
         }
@@ -361,7 +464,7 @@ impl Runtime {
         cl.ifaces.iter().any(|&i| self.is_sub(i, t))
     }
 
-    fn find_method(&self, c: usize, key: &str) -> Option<Rc<Method>> {
+    pub(crate) fn find_method(&self, c: usize, key: &str) -> Option<Rc<Method>> {
         let mut cur = Some(c);
         while let Some(ci) = cur {
             if let Some(m) = self.classes[ci].methods.get(key) {
@@ -450,7 +553,7 @@ impl Runtime {
         }
     }
 
-    fn class_obj(&mut self, c: usize) -> Ref {
+    pub(crate) fn class_obj(&mut self, c: usize) -> Ref {
         if let Some(&r) = self.class_objs.get(&c) {
             return r;
         }
@@ -461,31 +564,11 @@ impl Runtime {
     }
 
     fn native(&mut self, key: &str, args: &[u32]) -> Option<R<u64>> {
+        if let Some(r) = self.hooked_native(key, args) {
+            return Some(r);
+        }
         match key {
             "Ljava/lang/Object;-><init>()V" => Some(Ok(0)),
-            "Ljava/lang/String;->length()I" => {
-                let n = match &self.heap[args[0] as usize].kind {
-                    Kind::Str(u) => u.len(),
-                    _ => 0,
-                };
-                Some(Ok(n as u64))
-            }
-            "Ljava/lang/String;->charAt(I)C" => {
-                let i = args[1] as i32;
-                let r = match &self.heap[args[0] as usize].kind {
-                    Kind::Str(u) if i >= 0 && (i as usize) < u.len() => Some(u[i as usize]),
-                    _ => None,
-                };
-                Some(match r {
-                    Some(c) => Ok(c as u64),
-                    None => Err(self.throw_new("Ljava/lang/StringIndexOutOfBoundsException;")),
-                })
-            }
-            "Ljava/lang/String;->equals(Ljava/lang/Object;)Z" => {
-                let a = self.heap[args[0] as usize].kind_str();
-                let b = if args[1] == 0 { None } else { self.heap[args[1] as usize].kind_str() };
-                Some(Ok((a.is_some() && a == b) as u64))
-            }
             "Landroid/winrt/Native;->fillRect(IIIII)V" => {
                 crate::ui::fill_rect(args[0] as i32, args[1] as i32, args[2] as i32, args[3] as i32, args[4] as i32);
                 Some(Ok(0))
@@ -516,6 +599,10 @@ impl Runtime {
                 crate::ui::exit();
                 Some(Ok(0))
             }
+            "Ldalvik/system/VMStack;->getStackClass2()Ljava/lang/Class;" => {
+                let o = self.load("Ljava/lang/Object;");
+                Some(Ok(self.class_obj(o) as u64))
+            }
             "Ljava/lang/Throwable;->nativeFillInStackTrace()Ljava/lang/Object;" => Some(Ok(0)),
             "Ljava/lang/Throwable;->nativeGetStackTrace(Ljava/lang/Object;)[Ljava/lang/StackTraceElement;" => Some(Ok(0)),
             "Ljava/lang/Class;->getPrimitiveClass(Ljava/lang/String;)Ljava/lang/Class;" => {
@@ -535,7 +622,7 @@ impl Runtime {
                 Some(Ok(self.class_obj(c) as u64))
             }
 
-            _ => None,
+            _ => self.res_native(key, args),
         }
     }
 
@@ -556,16 +643,9 @@ impl Runtime {
         }
         self.depth += 1;
         if m.code.is_some() {
-            let cn = self.classes[m.class].name.as_str();
-            if cn == "Ljava/lang/StringFactory;" {
-                let cn = cn.to_string();
-                if let Some(r) = self.intrinsic(&cn, &m.key, &args) {
-                    self.depth -= 1;
-                    return r;
-                }
-            } else if cn == "Ljava/lang/String;" {
-                let full = format!("Ljava/lang/String;->{}", m.key);
-                if let Some(r) = self.native(&full, &args) {
+            let h = self.classes[m.class].hook;
+            if h != 0 {
+                if let Some(r) = self.hook_native(h, &m.key, &args) {
                     self.depth -= 1;
                     return r;
                 }
@@ -576,6 +656,10 @@ impl Runtime {
             if self.log_text {
                 eprintln!("[setText] #{} {:?}", args[0], t);
             }
+            if self.text_log.len() > 20000 {
+                self.text_log.drain(..10000);
+            }
+            self.text_log.push(t.clone());
             self.last_text = t;
         }
         if self.trace {
@@ -593,63 +677,10 @@ impl Runtime {
         r
     }
 
-    fn arr_vec(&self, r: u32) -> Vec<u64> {
+    pub(crate) fn arr_vec(&self, r: u32) -> Vec<u64> {
         match &self.heap[r as usize].kind {
             Kind::Array(v) => v.clone(),
             _ => vec![],
-        }
-    }
-
-    fn intrinsic(&mut self, class: &str, key: &str, a: &[u32]) -> Option<R<u64>> {
-        if class != "Ljava/lang/StringFactory;" {
-            return None;
-        }
-        let sub = |v: &Vec<u64>, off: i32, n: i32| -> Option<Vec<u64>> {
-            if off < 0 || n < 0 || (off as usize) + (n as usize) > v.len() {
-                None
-            } else {
-                Some(v[off as usize..(off + n) as usize].to_vec())
-            }
-        };
-        let units: Option<Option<Vec<u16>>> = match key {
-            "newEmptyString()Ljava/lang/String;" => Some(Some(vec![])),
-            "newStringFromBytes([B)Ljava/lang/String;" => {
-                let v = self.arr_vec(a[0]);
-                Some(Some(v.iter().map(|&x| (x as u8) as u16).collect()))
-            }
-            "newStringFromBytes([BII)Ljava/lang/String;" => {
-                let v = self.arr_vec(a[0]);
-                Some(sub(&v, a[1] as i32, a[2] as i32).map(|s| s.iter().map(|&x| (x as u8) as u16).collect()))
-            }
-            "newStringFromBytes([BIII)Ljava/lang/String;" => {
-                let v = self.arr_vec(a[0]);
-                let hi = (a[1] as u16) << 8;
-                Some(sub(&v, a[2] as i32, a[3] as i32).map(|s| s.iter().map(|&x| hi | (x as u8) as u16).collect()))
-            }
-            "newStringFromChars([C)Ljava/lang/String;" => {
-                let v = self.arr_vec(a[0]);
-                Some(Some(v.iter().map(|&x| x as u16).collect()))
-            }
-            "newStringFromChars([CII)Ljava/lang/String;" => {
-                let v = self.arr_vec(a[0]);
-                Some(sub(&v, a[1] as i32, a[2] as i32).map(|s| s.iter().map(|&x| x as u16).collect()))
-            }
-            "newStringFromChars(II[C)Ljava/lang/String;" => {
-                let v = self.arr_vec(a[2]);
-                Some(sub(&v, a[0] as i32, a[1] as i32).map(|s| s.iter().map(|&x| x as u16).collect()))
-            }
-            "newStringFromString(Ljava/lang/String;)Ljava/lang/String;" => {
-                if a[0] == 0 {
-                    return Some(Err(self.npe()));
-                }
-                self.heap[a[0] as usize].kind_str().map(Some)
-            }
-            _ => None,
-        };
-        match units {
-            None => None,
-            Some(None) => Some(Err(self.throw_new("Ljava/lang/StringIndexOutOfBoundsException;"))),
-            Some(Some(u)) => Some(Ok(self.new_string(u) as u64)),
         }
     }
 
@@ -688,7 +719,7 @@ impl Runtime {
         let found = self.classes[sf]
             .methods
             .values()
-            .find(|m| m.key.ends_with(")Ljava/lang/String;") && m.key[m.name.len()..].starts_with(&params) && m.name.starts_with("new"))
+            .find(|m| m.key.ends_with(")Ljava/lang/String;") && m.key[m.name.len()..].starts_with(&params) && m.name.starts_with("new") && !m.name.contains("Utf"))
             .cloned();
         match found {
             Some(m) => Ok(self.invoke(&m, args[1..].to_vec())? as u32),
@@ -1119,17 +1150,14 @@ impl Runtime {
                 let width = ins[p + 1] as usize;
                 let size = ins[p + 2] as usize | ((ins[p + 3] as usize) << 16);
                 let mut vals = Vec::with_capacity(size);
-                let mut q = p + 4;
+                let mut bp = (p + 4) * 2;
                 for _ in 0..size {
                     let mut v: u64 = 0;
-                    let units = (width + 1) / 2;
-                    for k in 0..units {
-                        v |= (ins[q + k] as u64) << (16 * k);
+                    for k in 0..width {
+                        let byte = (ins[(bp + k) / 2] >> (8 * ((bp + k) % 2))) as u64 & 0xff;
+                        v |= byte << (8 * k);
                     }
-                    q += units;
-                    if width == 1 {
-                        v &= 0xff;
-                    }
+                    bp += width;
                     vals.push(v);
                 }
                 let arr = r!(aa);
@@ -1295,7 +1323,7 @@ impl Runtime {
                 if o == 0 {
                     return Err(self.npe());
                 }
-                let v = self.heap[o as usize].fields[slot];
+                let v = self.heap[o as usize].fields.get(slot).copied().unwrap_or(0);
                 if op == 0x53 {
                     ww(f, a, v);
                 } else {
@@ -1310,7 +1338,12 @@ impl Runtime {
                     return Err(self.npe());
                 }
                 let v = if op == 0x5a { rw(f, a) } else { r!(a) as u64 };
-                self.heap[o as usize].fields[slot] = v;
+                let fl = &mut self.heap[o as usize].fields;
+                if slot >= fl.len() {
+                    fl.resize(slot + 1, 0);
+                }
+                fl[slot] = v;
+
                 len = 2;
             }
             0x60..=0x66 => {
@@ -1424,7 +1457,7 @@ impl Runtime {
 }
 
 impl Obj {
-    fn kind_str(&self) -> Option<Vec<u16>> {
+    pub(crate) fn kind_str(&self) -> Option<Vec<u16>> {
         match &self.kind {
             Kind::Str(u) => Some(u.clone()),
             _ => None,

@@ -74,3 +74,26 @@ Chosen route: winart, an ART-semantics runtime written for Windows, with `aosp/a
 ## Tooling found on this machine
 
 rustc 1.98.1 (msvc), VS2022 BuildTools MSVC 14.44, Windows SDK 10.0.26100, Android SDK (build-tools 36: aapt2, d8, dexdump; platforms 34 to 37), NDK 28.2 (clang), cmake 3.22.1, JDK 25, git, python 3.10. `rea` handles native binaries only through Ghidra (`GHIDRA_INSTALL_DIR` unset) and rejects APK/archive targets; it becomes useful for native `.so` analysis later.
+
+## Resources and layouts
+
+`arsc.rs` parses resources.arsc, `axml.rs` parses binary XML, `LayoutInflater` builds standard views from compiled layouts (View, TextView, Button, LinearLayout, include, merge, onClick, ids, margins, weights, gravity, dimens, colors, strings). `Activity.setContentView(int)` and `findViewById` work.
+Verified with testapp2 (LayoutTest.apk, normal aapt2-built XML layout): `winart test testapp2/out/LayoutTest.apk --dump --seen "Taps: 2" Tap Tap` prints the laid-out view tree and clicks real buttons. WinCalc still passes.
+
+## String model
+
+`java.lang.String` objects are `Kind::Str(Vec<u16>)` heap objects (UTF-16 code units, no instance fields). Literals, interned strings and every runtime-created string use this one representation, so dex code and natives always see the same objects.
+
+`StringBuilder`, `StringBuffer`, `AbstractStringBuilder`, `Integer.toString`, `Formatter` and `Pattern` are the real libcore classes from `boot/core.dex`. They reach strings only through the String API, which is native, so `+` concatenation (compiled to `StringBuilder` by javac) works on native strings the same as on literals.
+
+Dispatch goes through `Class.hook` (`hook_for` in `runtime.rs`, set at class load). `invoke` and `call_native` call `hook_native` first; a hook returns `None` to fall through to the dex body or `UNRESOLVED`. There is no per-class `match` in `runtime.rs` any more.
+
+| Hook | File | Content |
+|---|---|---|
+| `HOOK_STRING` | `strings.rs` | `length`, `charAt`, `hashCode`, `equals`, `equalsIgnoreCase`, `compareTo`, `indexOf`/`lastIndexOf` (char and String), `startsWith`, `endsWith`, `contains`, `substring`/`fastSubstring`, `trim`, case mapping, `replace`/`doReplace`, `concat`, `intern`, `isEmpty`, `toCharArray`, `getCharsNoCheck`, `getBytes`/`fillBytesLatin1`, `doRepeat` |
+| `HOOK_FACTORY` | `strings.rs` | `StringFactory.new*`: UTF-8, ISO-8859-1, US-ASCII, UTF-16 (LE/BE/BOM) by charset name or `Charset` object, `newStringFromUtf16Bytes`; `new String(...)` call sites are routed to `StringFactory` |
+| `HOOK_OBJECT`, `HOOK_CLASS`, `HOOK_SYSTEM`, `HOOK_MATH`, `HOOK_BITS`, `HOOK_UTF16`, `HOOK_CHAR` | `natives.rs` | `getClass`, `identityHashCodeNative`, `internalClone`, `Class.getName`/`getSimpleName`, `System.arraycopy`, properties and time, `Math`/`StrictMath`, float/double bit conversion, `StringUTF16.isBigEndian`, `Character` Impl methods |
+| `HOOK_REFERENCE`, `HOOK_VMRUNTIME` | `natives.rs` | `Reference.getReferent`/`refersTo0`/`clearReferent`, `VMRuntime` queries |
+| `HOOK_THREAD`, `HOOK_REGISTRY`, `HOOK_PATTERN`, `HOOK_MATCHER` | `rx.rs` | `Thread.currentThread`/`sleep`, `NativeAllocationRegistry`, ICU regex natives backed by `rx.rs` |
+
+Verified with testapp3 (StringTest.apk, 267 checks: StringBuilder append/insert/delete/reverse/growth/unicode, `+` concatenation, `String.valueOf`, number conversion, case, compare, split, bytes and charsets, bounds exceptions, identity, collections, regex, floating point, `String.format`): `winart test testapp3/out/StringTest.apk --seen "STRINGTEST ALL PASS"`. WinCalc and LayoutTest still pass.

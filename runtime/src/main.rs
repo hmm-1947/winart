@@ -1,5 +1,11 @@
+mod arsc;
 mod axml;
 mod dex;
+mod natives;
+mod resnative;
+mod rx;
+mod strings;
+
 mod runtime;
 mod ui;
 mod zip;
@@ -121,6 +127,10 @@ fn load_app(path: &str) -> Result<(runtime::Runtime, axml::Manifest, u32), Strin
     for name in dex_names(&z) {
         rt.add_dex(dex::Dex::parse(z.read(&name).ok_or("dex read failed")?)?);
     }
+    if let Some(b) = z.read("resources.arsc") {
+        rt.arsc = Some(arsc::parse(&b)?);
+    }
+    rt.apk = Some(z);
     let desc = format!("L{};", launcher.replace('.', "/"));
     let act = rt.new_instance(&desc).map_err(|e| format!("new activity failed: {}", rt.class_name_of(e)))?;
     Ok((rt, mf, act))
@@ -138,7 +148,12 @@ fn start_activity(rt: &mut runtime::Runtime, mf: &axml::Manifest, act: u32, dens
 
 fn run_apk(path: &str) -> Result<(), String> {
     let (mut rt, mf, act) = load_app(path)?;
-    let density = ui::create(&mut rt, &mf.package, 360, 640);
+    let title = mf
+        .label_res
+        .and_then(|id| rt.arsc.as_ref().and_then(|a| a.lookup(id).and_then(|v| a.string(v))))
+        .or(mf.label.clone())
+        .unwrap_or(mf.package.clone());
+    let density = ui::create(&mut rt, &title, 360, 640);
     start_activity(&mut rt, &mf, act, density)?;
     ui::pump();
     Ok(())
@@ -148,6 +163,8 @@ fn test_apk(path: &str, args: &[String]) -> Result<(), String> {
     let mut expect: Option<String> = None;
     let mut repeat = 1usize;
     let mut force_gc = false;
+    let mut dump = false;
+    let mut seen: Vec<String> = Vec::new();
     let mut keys = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -157,6 +174,12 @@ fn test_apk(path: &str, args: &[String]) -> Result<(), String> {
         } else if args[i] == "--repeat" && i + 1 < args.len() {
             repeat = args[i + 1].parse().map_err(|_| "bad --repeat".to_string())?;
             i += 2;
+        } else if args[i] == "--seen" && i + 1 < args.len() {
+            seen.push(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--dump" {
+            dump = true;
+            i += 1;
         } else if args[i] == "--gc" {
             force_gc = true;
             i += 1;
@@ -167,6 +190,12 @@ fn test_apk(path: &str, args: &[String]) -> Result<(), String> {
     }
     let (mut rt, mf, act) = load_app(path)?;
     start_activity(&mut rt, &mf, act, 2.0)?;
+    if dump {
+        let r = rt
+            .call_static("Landroid/winrt/Host;", "dump(II)Ljava/lang/String;", vec![720, 1280])
+            .map_err(|e| format!("dump exception {}", rt.class_name_of(e)))?;
+        println!("{}", rt.string_value(r as u32));
+    }
     let heap0 = rt.live_objects();
     let mut peak = heap0;
     for round in 0..repeat {
@@ -193,6 +222,12 @@ fn test_apk(path: &str, args: &[String]) -> Result<(), String> {
                 return Err(format!("FAIL round {} expected display {:?} got {:?}", round, e, rt.last_text));
             }
         }
+    }
+    for s in &seen {
+        if !rt.text_log.iter().any(|t| t == s) {
+            return Err(format!("FAIL setText never produced {:?}", s));
+        }
+        println!("PASS saw text {:?}", s);
     }
     println!("heap objects: start {} end {} peak {} gc runs {}", heap0, rt.live_objects(), peak, rt.gc_runs);
     if let Some(e) = expect {
